@@ -86,19 +86,47 @@ BIN="${INSTALL_DIR}/snake_ss"
 MODE_FLAG="${SNAKE_SS_MODE}"
 [[ "\$MODE_FLAG" == "snake" ]] && MODE_FLAG=""  # snake is the default, no flag needed
 
+_find_user_ttys() {
+    # Find all TTYs owned by the current user (works from systemd service context
+    # where tty(1) returns nothing because there is no controlling terminal).
+    local uid
+    uid=\$(id -u)
+    for dev in /dev/tty[0-9]* /dev/pts/[0-9]*; do
+        [[ -c "\$dev" ]] || continue
+        local owner
+        owner=\$(stat -c %u "\$dev" 2>/dev/null) || continue
+        [[ "\$owner" == "\$uid" ]] && printf '%s\n' "\$dev"
+    done
+}
+
 while true; do
-    # Find the TTY for this session.
-    # Works for both direct TTY login and tmux/screen (uses the outermost TTY).
-    TTY_DEV=\$(tty 2>/dev/null)
-    if [[ -z "\$TTY_DEV" || ! -c "\$TTY_DEV" ]]; then
+    # Collect all TTYs owned by this user (handles systemd service context
+    # where tty(1) returns nothing).
+    mapfile -t TTYS < <(_find_user_ttys)
+    if [[ \${#TTYS[@]} -eq 0 ]]; then
         sleep 10
         continue
     fi
 
-    # atime of the TTY device is updated by the kernel on each input event.
+    # Pick the TTY that has been idle the longest and track the most-idle one.
+    TTY_DEV=""
+    MAX_IDLE=0
     NOW=\$(date +%s)
-    ATIME=\$(stat -c %X "\$TTY_DEV" 2>/dev/null || echo "\$NOW")
-    IDLE=\$(( NOW - ATIME ))
+    for dev in "\${TTYS[@]}"; do
+        ATIME=\$(stat -c %X "\$dev" 2>/dev/null) || continue
+        IDLE=\$(( NOW - ATIME ))
+        if (( IDLE > MAX_IDLE )); then
+            MAX_IDLE=\$IDLE
+            TTY_DEV=\$dev
+        fi
+    done
+
+    if [[ -z "\$TTY_DEV" ]]; then
+        sleep 10
+        continue
+    fi
+
+    IDLE=\$MAX_IDLE
 
     if (( IDLE >= TIMEOUT )); then
         # Launch screensaver directly on the TTY.
